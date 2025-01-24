@@ -511,7 +511,6 @@ func (mw *GinJWTMiddleware) LoginHandler(c *gin.Context) {
 func (mw *GinJWTMiddleware) Login2FAHandler(c *gin.Context) {
 	fmt.Printf("这是我自定义仓库的2fa登陆handler \r\n")
 	claims, err := mw.GetClaimsFromJWT(c)
-	fmt.Printf("claims: %#v\n", claims)
 	if err != nil {
 		mw.unauthorized(c, http.StatusUnauthorized, mw.HTTPStatusMessageFunc(err, c))
 		return
@@ -538,7 +537,6 @@ func (mw *GinJWTMiddleware) Login2FAHandler(c *gin.Context) {
 			newClaims[key] = value
 		}
 	}
-	fmt.Printf("new claims: %#v\n", newClaims)
 	expire := mw.TimeFunc().Add(mw.Timeout)
 	newClaims["exp"] = expire.Unix()
 	newClaims["orig_iat"] = mw.TimeFunc().Unix()
