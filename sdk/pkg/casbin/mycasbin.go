@@ -6,11 +6,11 @@ import (
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/log"
 	"github.com/casbin/casbin/v2/model"
-	redisWatcher "github.com/casbin/redis-watcher/v2"
 	"github.com/go-admin-team/go-admin-core/logger"
 	"github.com/go-admin-team/go-admin-core/sdk"
 	"github.com/go-admin-team/go-admin-core/sdk/config"
-	"github.com/go-redis/redis/v8"
+	redisWatcher "github.com/go-admin-team/redis-watcher/v2"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	gormAdapter "github.com/go-admin-team/gorm-adapter/v3"
@@ -38,10 +38,11 @@ var (
 
 func Setup(db *gorm.DB, _ string) *casbin.SyncedEnforcer {
 	once.Do(func() {
-		Apter, err := gormAdapter.NewAdapterByDB(db)
-		if err != nil {
+		Apter, err := gormAdapter.NewAdapterByDBUseTableName(db, "", "casbin_rule")
+		if err != nil && err.Error() != "invalid DDL" {
 			panic(err)
 		}
+
 		m, err := model.NewModelFromString(text)
 		if err != nil {
 			panic(err)

@@ -3,6 +3,7 @@ package jwtauth
 import (
 	"crypto/rsa"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"strings"
@@ -13,8 +14,6 @@ import (
 )
 
 const JwtPayloadKey = "JWT_PAYLOAD"
-
-type MapClaims map[string]interface{}
 
 // GinJWTMiddleware provides a Json-Web-Token authentication implementation. On failure, a 401 HTTP response
 // is returned. On success, the wrapped middleware is called, and the userID is made available as
@@ -46,6 +45,11 @@ type GinJWTMiddleware struct {
 	// Check error (e) to determine the appropriate error message.
 	Authenticator func(c *gin.Context) (interface{}, error)
 
+	// Callback function that should perform the authentication of the user based on login info.
+	// Must return user data as user identifier, it will be stored in Claim Array. Required.
+	// Check error (e) to determine the appropriate error message.
+	TwoFaAuthenticator func(c *gin.Context) (interface{}, error)
+
 	// Callback function that should perform the authorization of the authenticated user. Called
 	// only after an authentication success. Must return true on success, false on failure.
 	// Optional, default to success.
@@ -74,23 +78,20 @@ type GinJWTMiddleware struct {
 	// Set the identity handler function
 	IdentityHandler func(*gin.Context) interface{}
 
+	// 关键字段，用于存储用户信息
 	// Set the identity key
 	IdentityKey string
-
-	// username
+	// 用户名
 	NiceKey string
-
+	// 数据权限类型
 	DataScopeKey string
-
-	// rolekey
+	// role key
 	RKey string
-
-	// roleId
+	// 角色id
 	RoleIdKey string
-
+	// 角色key
 	RoleKey string
-
-	// roleName
+	// 角色名称
 	RoleNameKey string
 
 	// TokenLookup is a string in the form of "<source>:<name>" that is used
@@ -162,6 +163,8 @@ var (
 	// ErrFailedAuthentication indicates authentication failed, could be faulty username or password
 	ErrFailedAuthentication = errors.New("incorrect Username or Password")
 
+	ErrFailed2FAAuthentication = errors.New("2FA authentication failed")
+
 	// ErrFailedTokenCreation indicates JWT Token failed to create, reason unknown
 	ErrFailedTokenCreation = errors.New("failed to create JWT Token")
 
@@ -205,6 +208,9 @@ var (
 
 	// ErrInvalidPubKey indicates the the given public key is invalid
 	ErrInvalidPubKey = errors.New("public key invalid")
+
+	// Login Step
+	LoginStepKey = "loginStep"
 
 	// IdentityKey default identity key
 	IdentityKey = "identity"
@@ -401,17 +407,13 @@ func (mw *GinJWTMiddleware) middlewareImpl(c *gin.Context) {
 		mw.unauthorized(c, http.StatusUnauthorized, mw.HTTPStatusMessageFunc(err, c))
 		return
 	}
-
-	if claims["exp"] == nil {
-		mw.unauthorized(c, http.StatusBadRequest, mw.HTTPStatusMessageFunc(ErrMissingExpField, c))
+	fmt.Printf("claims: %#v\n", claims)
+	exp, err := claims.Exp()
+	if err != nil {
+		mw.unauthorized(c, http.StatusBadRequest, mw.HTTPStatusMessageFunc(err, c))
 		return
 	}
-
-	if _, ok := claims["exp"].(float64); !ok {
-		mw.unauthorized(c, http.StatusBadRequest, mw.HTTPStatusMessageFunc(ErrWrongFormatOfExp, c))
-		return
-	}
-	if int64(claims["exp"].(float64)) < mw.TimeFunc().Unix() {
+	if exp < mw.TimeFunc().Unix() {
 		mw.unauthorized(c, 6401, mw.HTTPStatusMessageFunc(ErrExpiredToken, c))
 		return
 	}
@@ -445,18 +447,14 @@ func (mw *GinJWTMiddleware) GetClaimsFromJWT(c *gin.Context) (MapClaims, error) 
 		}
 	}
 
-	claims := MapClaims{}
-	for key, value := range token.Claims.(jwt.MapClaims) {
-		claims[key] = value
-	}
-
-	return claims, nil
+	return MapClaims(token.Claims.(jwt.MapClaims)), nil
 }
 
 // LoginHandler can be used by clients to get a jwt token.
 // Payload needs to be json in the form of {"username": "USERNAME", "password": "PASSWORD"}.
 // Reply will be of the form {"token": "TOKEN"}.
 func (mw *GinJWTMiddleware) LoginHandler(c *gin.Context) {
+	fmt.Printf("这是我自定义仓库的登陆handler \r\n")
 	if mw.Authenticator == nil {
 		mw.unauthorized(c, http.StatusInternalServerError, mw.HTTPStatusMessageFunc(ErrMissingAuthenticatorFunc, c))
 		return
@@ -477,6 +475,71 @@ func (mw *GinJWTMiddleware) LoginHandler(c *gin.Context) {
 	expire := mw.TimeFunc().Add(mw.Timeout)
 	claims["exp"] = expire.Unix()
 	claims["orig_iat"] = mw.TimeFunc().Unix()
+	tokenString, err := mw.signedString(token)
+
+	if err != nil {
+		mw.unauthorized(c, http.StatusOK, mw.HTTPStatusMessageFunc(ErrFailedTokenCreation, c))
+		return
+	}
+
+	// set cookie
+	if mw.SendCookie {
+		maxage := int(expire.Unix() - time.Now().Unix())
+		c.SetCookie(
+			mw.CookieName,
+			tokenString,
+			maxage,
+			"/",
+			mw.CookieDomain,
+			mw.SecureCookie,
+			mw.CookieHTTPOnly,
+		)
+	}
+
+	if claims[LoginStepKey] == 1 {
+		// 第一步登陆获取临时jwt
+		mw.LoginResponse(c, http.StatusForbidden, tokenString, expire)
+	} else {
+		// 第二步通过2fa验证，获取正式jwt
+		mw.AntdLoginResponse(c, http.StatusOK, tokenString, expire)
+	}
+}
+
+// Login2FAHandler can be used by clients to get a jwt token after 2fa verify success.
+// Payload needs to be json in the form of {"code": "2facode", "tempToken": "temptoken"}.
+// Reply will be of the form {"token": "TOKEN"}.
+func (mw *GinJWTMiddleware) Login2FAHandler(c *gin.Context) {
+	fmt.Printf("这是我自定义仓库的2fa登陆handler \r\n")
+	claims, err := mw.GetClaimsFromJWT(c)
+	if err != nil {
+		mw.unauthorized(c, http.StatusUnauthorized, mw.HTTPStatusMessageFunc(err, c))
+		return
+	}
+	exp, err := claims.Exp()
+	if err != nil {
+		mw.unauthorized(c, http.StatusBadRequest, mw.HTTPStatusMessageFunc(err, c))
+		return
+	}
+	if exp < mw.TimeFunc().Unix() {
+		mw.unauthorized(c, 6401, mw.HTTPStatusMessageFunc(ErrExpiredToken, c))
+		return
+	}
+	data, err := mw.TwoFaAuthenticator(c)
+	if err != nil {
+		mw.unauthorized(c, 400, mw.HTTPStatusMessageFunc(err, c))
+		return
+	}
+	// 2fa认证通过，生成访问token
+	token := jwt.New(jwt.GetSigningMethod(mw.SigningAlgorithm))
+	newClaims := token.Claims.(jwt.MapClaims)
+	if mw.PayloadFunc != nil {
+		for key, value := range mw.PayloadFunc(data) {
+			newClaims[key] = value
+		}
+	}
+	expire := mw.TimeFunc().Add(mw.Timeout)
+	newClaims["exp"] = expire.Unix()
+	newClaims["orig_iat"] = mw.TimeFunc().Unix()
 	tokenString, err := mw.signedString(token)
 
 	if err != nil {
@@ -582,15 +645,17 @@ func (mw *GinJWTMiddleware) CheckIfTokenExpire(c *gin.Context) (jwt.MapClaims, e
 		}
 	}
 
-	claims := token.Claims.(jwt.MapClaims)
-
-	origIat := int64(claims["orig_iat"].(float64))
+	claims := MapClaims(token.Claims.(jwt.MapClaims))
+	origIat, err := claims.OrigIat()
+	if err != nil {
+		return nil, err
+	}
 
 	if origIat < mw.TimeFunc().Add(-mw.MaxRefresh).Unix() {
 		return nil, ErrExpiredToken
 	}
 
-	return claims, nil
+	return token.Claims.(jwt.MapClaims), nil
 }
 
 // TokenGenerator method that clients can use to get a jwt token.
@@ -699,7 +764,7 @@ func (mw *GinJWTMiddleware) ParseToken(c *gin.Context) (*jwt.Token, error) {
 		c.Set("JWT_TOKEN", token)
 
 		return mw.Key, nil
-	})
+	}, jwt.WithJSONNumber())
 }
 
 // ParseTokenString parse jwt token string
