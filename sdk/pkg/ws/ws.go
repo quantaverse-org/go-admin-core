@@ -319,8 +319,8 @@ func (manager *Manager) UnWsClient(c *gin.Context) {
 	})
 }
 
-func SendGroup(msg []byte) {
-	WebsocketManager.SendGroup("leffss", []byte("{\"code\":200,\"data\":"+string(msg)+"}"))
+func SendGroup(group string, msg []byte) {
+	WebsocketManager.SendGroup(group, []byte("{\"code\":200,\"data\":"+string(msg)+"}"))
 	fmt.Println(WebsocketManager.Info())
 }
 
