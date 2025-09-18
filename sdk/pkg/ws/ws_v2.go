@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,12 @@ const (
 	MsgTypeResponse    = "response" // 服务端响应
 	MsgTypeData        = "data"
 	MsgTypeError       = "error"
+)
+
+// 主题类型
+const (
+	TopicTypePublic = "public" // 公开主题
+	TopicTypeUser   = "user"   // 用户私有主题
 )
 
 // 自定义消息协议
@@ -201,6 +208,42 @@ func (m *ManagerV2) monitorConnections() {
 	}
 }
 
+// 主题权限验证
+func (c *ClientV2) canSubscribeTopic(topic string) bool {
+	// 公开主题，所有用户都可以订阅
+	if isPublicTopic(topic) {
+		return true
+	}
+
+	// 用户私有主题，需要验证权限
+	if isUserTopic(topic) {
+		return c.canSubscribeUserTopic(topic)
+	}
+
+	// 其他主题类型暂时不允许
+	return false
+}
+
+// 检查是否为公开主题
+func isPublicTopic(topic string) bool {
+	return strings.HasPrefix(topic, "public.")
+}
+
+// 检查是否为用户私有主题
+func isUserTopic(topic string) bool {
+	return strings.HasPrefix(topic, "user.")
+}
+
+// 检查用户是否可以订阅私有主题
+func (c *ClientV2) canSubscribeUserTopic(topic string) bool {
+	// 后续可以添加更细致的权限控制
+	if c.UserID == 0 {
+		return false
+	}
+
+	return true
+}
+
 // 发送消息到客户端
 func (m *ManagerV2) sendToClient(c *ClientV2, msg []byte) {
 	select {
@@ -346,19 +389,28 @@ func (c *ClientV2) handleSubscribe(m *ManagerV2, topic string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// 检查主题名格式
 	isValid := isValidTopicName(topic)
 	if !isValid {
 		c.sendError("invalid_topic", "Invalid topic name")
 		return
 	}
 
+	// 检查订阅数量限制
 	if len(c.Subscriptions) >= MaxTopicsPerClient {
 		c.sendError("subscription_limit", fmt.Sprintf("Maximum subscription limit reached (%d)", MaxTopicsPerClient))
 		return
 	}
 
+	// 检查是否已经订阅
 	if _, exists := c.Subscriptions[topic]; exists {
 		c.sendSuccess("subscribe_success", "Already subscribed")
+		return
+	}
+
+	// 检查主题权限
+	if !c.canSubscribeTopic(topic) {
+		c.sendError("permission_denied", "Permission denied")
 		return
 	}
 
@@ -646,4 +698,43 @@ func SendAllV2(message []byte) {
 
 func SendOneV2(clientID string, message []byte) {
 	WebsocketManagerV2.SendToOne(clientID, message)
+}
+
+// 检查主题是否有订阅者
+func (m *ManagerV2) HasSubscribers(topic string) bool {
+	m.Lock.RLock()
+	defer m.Lock.RUnlock()
+
+	if clients, exists := m.Topics[topic]; exists {
+		return len(clients) > 0
+	}
+	return false
+}
+
+// 获取所有活跃主题
+func (m *ManagerV2) GetActiveTopics() []string {
+	m.Lock.RLock()
+	defer m.Lock.RUnlock()
+
+	var topics []string
+	for topic, clients := range m.Topics {
+		if len(clients) > 0 {
+			topics = append(topics, topic)
+		}
+	}
+	return topics
+}
+
+// 根据topic关键词获取活跃主题和客户端
+func (m *ManagerV2) GetActiveTopicsByKeyword(keyword string) map[string]map[string]*ClientV2 {
+	m.Lock.RLock()
+	defer m.Lock.RUnlock()
+
+	topics := make(map[string]map[string]*ClientV2)
+	for topic, clients := range m.Topics {
+		if len(clients) > 0 && strings.Contains(topic, keyword) {
+			topics[topic] = clients
+		}
+	}
+	return topics
 }
