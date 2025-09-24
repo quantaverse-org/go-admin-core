@@ -208,6 +208,22 @@ func (m *ManagerV2) monitorConnections() {
 	}
 }
 
+// 展开用户主题：user.xxx -> user.{userID}.xxx
+func (c *ClientV2) expandUserTopic(topic string) string {
+	if !isUserTopic(topic) {
+		return topic
+	}
+
+	// 移除 user. 前缀
+	subTopic := strings.TrimPrefix(topic, "user.")
+	if subTopic == "" {
+		return ""
+	}
+
+	// 构造完整的用户主题：user.{userID}.xxx
+	return fmt.Sprintf("user.%d.%s", c.UserID, subTopic)
+}
+
 // 主题权限验证
 func (c *ClientV2) canSubscribeTopic(topic string) bool {
 	// 公开主题，所有用户都可以订阅
@@ -402,29 +418,39 @@ func (c *ClientV2) handleSubscribe(m *ManagerV2, topic string) {
 		return
 	}
 
+	// 处理用户私有主题：user.xxx -> user.{userID}.xxx
+	finalTopic := topic
+	if isUserTopic(topic) {
+		finalTopic = c.expandUserTopic(topic)
+		if finalTopic == "" {
+			c.sendError("invalid_topic", "Invalid user topic format")
+			return
+		}
+	}
+
 	// 检查是否已经订阅
-	if _, exists := c.Subscriptions[topic]; exists {
+	if _, exists := c.Subscriptions[finalTopic]; exists {
 		c.sendSuccess("subscribe_success", "Already subscribed")
 		return
 	}
 
 	// 检查主题权限
-	if !c.canSubscribeTopic(topic) {
+	if !c.canSubscribeTopic(finalTopic) {
 		c.sendError("permission_denied", "Permission denied")
 		return
 	}
 
 	// 添加到主题
 	m.Lock.Lock()
-	if _, exists := m.Topics[topic]; !exists {
-		m.Topics[topic] = make(map[string]*ClientV2)
+	if _, exists := m.Topics[finalTopic]; !exists {
+		m.Topics[finalTopic] = make(map[string]*ClientV2)
 	}
-	m.Topics[topic][c.ID] = c
+	m.Topics[finalTopic][c.ID] = c
 	m.Lock.Unlock()
 
-	c.Subscriptions[topic] = true
-	c.sendSuccess("subscribe_success", fmt.Sprintf("Subscribed to %s", topic))
-	log.Printf("Client %s subscribed to %s", c.ID, topic)
+	c.Subscriptions[finalTopic] = true
+	c.sendSuccess("subscribe_success", fmt.Sprintf("Subscribed to %s", finalTopic))
+	log.Printf("Client %s subscribed to %s", c.ID, finalTopic)
 }
 
 // 处理取消订阅
@@ -662,9 +688,72 @@ func isValidTopicName(topic string) bool {
 		return false
 	}
 
-	// 只允许字母、数字、下划线、连字符和点号（用于层级结构）
-	validTopicRegex := regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
-	return validTopicRegex.MatchString(topic)
+	// 检查主题格式：public.xxx 或 user.xxx
+	if isPublicTopic(topic) {
+		// 公开主题：public.xxx
+		return validatePublicTopic(topic)
+	} else if isUserTopic(topic) {
+		// 用户私有主题：user.xxx（会被展开为user.{userID}.xxx）
+		return validateUserTopicPrefix(topic)
+	}
+	return false
+}
+
+// 验证用户私有主题前缀格式
+func validateUserTopicPrefix(topic string) bool {
+	// user.xxx 格式
+	parts := strings.Split(topic, ".")
+	if len(parts) < 2 {
+		return false
+	}
+
+	// 检查user前缀
+	if parts[0] != "user" {
+		return false
+	}
+
+	// 检查子主题格式
+	for i := 1; i < len(parts); i++ {
+		if !isValidTopicPart(parts[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// 验证公开主题格式
+func validatePublicTopic(topic string) bool {
+	// public.xxx 格式
+	parts := strings.Split(topic, ".")
+	if len(parts) < 2 {
+		return false
+	}
+
+	// 检查public前缀
+	if parts[0] != "public" {
+		return false
+	}
+
+	// 检查子主题格式
+	for i := 1; i < len(parts); i++ {
+		if !isValidTopicPart(parts[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// 验证主题部分格式
+func isValidTopicPart(part string) bool {
+	if part == "" {
+		return false
+	}
+
+	// 只允许字母、数字、下划线、连字符
+	validPartRegex := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	return validPartRegex.MatchString(part)
 }
 
 // 获取管理器状态
