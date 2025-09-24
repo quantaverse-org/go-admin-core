@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,12 @@ const (
 	MsgTypeResponse    = "response" // 服务端响应
 	MsgTypeData        = "data"
 	MsgTypeError       = "error"
+)
+
+// 主题类型
+const (
+	TopicTypePublic = "public" // 公开主题
+	TopicTypeUser   = "user"   // 用户私有主题
 )
 
 // 自定义消息协议
@@ -201,6 +208,58 @@ func (m *ManagerV2) monitorConnections() {
 	}
 }
 
+// 展开用户主题：user.xxx -> user.{userID}.xxx
+func (c *ClientV2) expandUserTopic(topic string) string {
+	if !isUserTopic(topic) {
+		return topic
+	}
+
+	// 移除 user. 前缀
+	subTopic := strings.TrimPrefix(topic, "user.")
+	if subTopic == "" {
+		return ""
+	}
+
+	// 构造完整的用户主题：user.{userID}.xxx
+	return fmt.Sprintf("user.%d.%s", c.UserID, subTopic)
+}
+
+// 主题权限验证
+func (c *ClientV2) canSubscribeTopic(topic string) bool {
+	// 公开主题，所有用户都可以订阅
+	if isPublicTopic(topic) {
+		return true
+	}
+
+	// 用户私有主题，需要验证权限
+	if isUserTopic(topic) {
+		return c.canSubscribeUserTopic(topic)
+	}
+
+	// 其他主题类型暂时不允许
+	return false
+}
+
+// 检查是否为公开主题
+func isPublicTopic(topic string) bool {
+	return strings.HasPrefix(topic, "public.")
+}
+
+// 检查是否为用户私有主题
+func isUserTopic(topic string) bool {
+	return strings.HasPrefix(topic, "user.")
+}
+
+// 检查用户是否可以订阅私有主题
+func (c *ClientV2) canSubscribeUserTopic(topic string) bool {
+	// 后续可以添加更细致的权限控制
+	if c.UserID == 0 {
+		return false
+	}
+
+	return true
+}
+
 // 发送消息到客户端
 func (m *ManagerV2) sendToClient(c *ClientV2, msg []byte) {
 	select {
@@ -346,33 +405,52 @@ func (c *ClientV2) handleSubscribe(m *ManagerV2, topic string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// 检查主题名格式
 	isValid := isValidTopicName(topic)
 	if !isValid {
 		c.sendError("invalid_topic", "Invalid topic name")
 		return
 	}
 
+	// 检查订阅数量限制
 	if len(c.Subscriptions) >= MaxTopicsPerClient {
 		c.sendError("subscription_limit", fmt.Sprintf("Maximum subscription limit reached (%d)", MaxTopicsPerClient))
 		return
 	}
 
-	if _, exists := c.Subscriptions[topic]; exists {
+	// 处理用户私有主题：user.xxx -> user.{userID}.xxx
+	finalTopic := topic
+	if isUserTopic(topic) {
+		finalTopic = c.expandUserTopic(topic)
+		if finalTopic == "" {
+			c.sendError("invalid_topic", "Invalid user topic format")
+			return
+		}
+	}
+
+	// 检查是否已经订阅
+	if _, exists := c.Subscriptions[finalTopic]; exists {
 		c.sendSuccess("subscribe_success", "Already subscribed")
+		return
+	}
+
+	// 检查主题权限
+	if !c.canSubscribeTopic(finalTopic) {
+		c.sendError("permission_denied", "Permission denied")
 		return
 	}
 
 	// 添加到主题
 	m.Lock.Lock()
-	if _, exists := m.Topics[topic]; !exists {
-		m.Topics[topic] = make(map[string]*ClientV2)
+	if _, exists := m.Topics[finalTopic]; !exists {
+		m.Topics[finalTopic] = make(map[string]*ClientV2)
 	}
-	m.Topics[topic][c.ID] = c
+	m.Topics[finalTopic][c.ID] = c
 	m.Lock.Unlock()
 
-	c.Subscriptions[topic] = true
-	c.sendSuccess("subscribe_success", fmt.Sprintf("Subscribed to %s", topic))
-	log.Printf("Client %s subscribed to %s", c.ID, topic)
+	c.Subscriptions[finalTopic] = true
+	c.sendSuccess("subscribe_success", fmt.Sprintf("Subscribed to %s", finalTopic))
+	log.Printf("Client %s subscribed to %s", c.ID, finalTopic)
 }
 
 // 处理取消订阅
@@ -610,9 +688,72 @@ func isValidTopicName(topic string) bool {
 		return false
 	}
 
-	// 只允许字母、数字、下划线、连字符和点号（用于层级结构）
-	validTopicRegex := regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
-	return validTopicRegex.MatchString(topic)
+	// 检查主题格式：public.xxx 或 user.xxx
+	if isPublicTopic(topic) {
+		// 公开主题：public.xxx
+		return validatePublicTopic(topic)
+	} else if isUserTopic(topic) {
+		// 用户私有主题：user.xxx（会被展开为user.{userID}.xxx）
+		return validateUserTopicPrefix(topic)
+	}
+	return false
+}
+
+// 验证用户私有主题前缀格式
+func validateUserTopicPrefix(topic string) bool {
+	// user.xxx 格式
+	parts := strings.Split(topic, ".")
+	if len(parts) < 2 {
+		return false
+	}
+
+	// 检查user前缀
+	if parts[0] != "user" {
+		return false
+	}
+
+	// 检查子主题格式
+	for i := 1; i < len(parts); i++ {
+		if !isValidTopicPart(parts[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// 验证公开主题格式
+func validatePublicTopic(topic string) bool {
+	// public.xxx 格式
+	parts := strings.Split(topic, ".")
+	if len(parts) < 2 {
+		return false
+	}
+
+	// 检查public前缀
+	if parts[0] != "public" {
+		return false
+	}
+
+	// 检查子主题格式
+	for i := 1; i < len(parts); i++ {
+		if !isValidTopicPart(parts[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// 验证主题部分格式
+func isValidTopicPart(part string) bool {
+	if part == "" {
+		return false
+	}
+
+	// 只允许字母、数字、下划线、连字符
+	validPartRegex := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	return validPartRegex.MatchString(part)
 }
 
 // 获取管理器状态
@@ -646,4 +787,43 @@ func SendAllV2(message []byte) {
 
 func SendOneV2(clientID string, message []byte) {
 	WebsocketManagerV2.SendToOne(clientID, message)
+}
+
+// 检查主题是否有订阅者
+func (m *ManagerV2) HasSubscribers(topic string) bool {
+	m.Lock.RLock()
+	defer m.Lock.RUnlock()
+
+	if clients, exists := m.Topics[topic]; exists {
+		return len(clients) > 0
+	}
+	return false
+}
+
+// 获取所有活跃主题
+func (m *ManagerV2) GetActiveTopics() []string {
+	m.Lock.RLock()
+	defer m.Lock.RUnlock()
+
+	var topics []string
+	for topic, clients := range m.Topics {
+		if len(clients) > 0 {
+			topics = append(topics, topic)
+		}
+	}
+	return topics
+}
+
+// 根据topic关键词获取活跃主题和客户端
+func (m *ManagerV2) GetActiveTopicsByKeyword(keyword string) map[string]map[string]*ClientV2 {
+	m.Lock.RLock()
+	defer m.Lock.RUnlock()
+
+	topics := make(map[string]map[string]*ClientV2)
+	for topic, clients := range m.Topics {
+		if len(clients) > 0 && strings.Contains(topic, keyword) {
+			topics[topic] = clients
+		}
+	}
+	return topics
 }
