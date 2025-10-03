@@ -751,8 +751,8 @@ func isValidTopicPart(part string) bool {
 		return false
 	}
 
-	// 只允许字母、数字、下划线、连字符
-	validPartRegex := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	// 允许字母、数字、下划线、连字符、斜杠
+	validPartRegex := regexp.MustCompile(`^[a-zA-Z0-9_/-]+$`)
 	return validPartRegex.MatchString(part)
 }
 
