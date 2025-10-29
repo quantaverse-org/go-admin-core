@@ -86,7 +86,7 @@ func (j *jsonValues) Scan(v interface{}) error {
 			fmt.Printf("完整的 JSON: %s\n", jsonStr)
 		} else {
 			jsonStr = string(b)
-			fmt.Printf("JSON 前1000字符: %s...\n", string(b[:1000]))
+			fmt.Printf("JSON 前2000字符: %s...\n", string(b[:2000]))
 		}
 
 		// 检查 JSON 中是否包含 logger
