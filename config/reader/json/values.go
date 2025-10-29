@@ -67,11 +67,61 @@ func (j *jsonValues) Map() map[string]interface{} {
 }
 
 func (j *jsonValues) Scan(v interface{}) error {
+	// 🔥 关键调试：记录扫描前状态
+	fmt.Printf("\n=== [jsonValues.Scan] 开始扫描 ===\n")
+	fmt.Printf("目标对象类型: %T\n", v)
+
 	b, err := j.sj.MarshalJSON()
 	if err != nil {
+		fmt.Printf("⚠️ [jsonValues.Scan] MarshalJSON 失败: %v\n", err)
 		return err
 	}
-	return json.Unmarshal(b, v)
+
+	// 🔥 关键调试：输出生成的 JSON
+	fmt.Printf("生成的 JSON 长度: %d bytes\n", len(b))
+	jsonStr := ""
+	if len(b) > 0 {
+		if len(b) < 2000 {
+			jsonStr = string(b)
+			fmt.Printf("完整的 JSON: %s\n", jsonStr)
+		} else {
+			jsonStr = string(b)
+			fmt.Printf("JSON 前1000字符: %s...\n", string(b[:1000]))
+		}
+
+		// 检查 JSON 中是否包含 logger
+		if strings.Contains(jsonStr, `"logger"`) {
+			fmt.Printf("✓ JSON 包含 'logger' 字段\n")
+			// 提取 logger 部分
+			if startIdx := strings.Index(jsonStr, `"logger"`); startIdx >= 0 {
+				endIdx := startIdx + 300
+				if endIdx > len(jsonStr) {
+					endIdx = len(jsonStr)
+				}
+				fmt.Printf("logger 部分: %s\n", jsonStr[startIdx:endIdx])
+			}
+		} else {
+			fmt.Printf("✗ JSON 不包含 'logger' 字段！\n")
+			fmt.Printf("检查是否包含 'settings': %v\n", strings.Contains(jsonStr, `"settings"`))
+		}
+	} else {
+		fmt.Printf("⚠️ 生成的 JSON 为空！\n")
+	}
+
+	err = json.Unmarshal(b, v)
+	if err != nil {
+		fmt.Printf("✗ [jsonValues.Scan] json.Unmarshal 失败: %v\n", err)
+		fmt.Printf("   JSON 长度: %d bytes\n", len(b))
+		if len(b) < 500 {
+			fmt.Printf("   完整 JSON: %q\n", string(b))
+		}
+	} else {
+		fmt.Printf("✓ [jsonValues.Scan] json.Unmarshal 成功\n")
+		// 尝试反射检查解析后的值
+		fmt.Printf("   目标对象地址: %p\n", v)
+	}
+	fmt.Printf("=== [jsonValues.Scan] 扫描完成 ===\n\n")
+	return err
 }
 
 func (j *jsonValues) String() string {
