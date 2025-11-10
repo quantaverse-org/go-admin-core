@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -53,6 +54,14 @@ type WSMessage struct {
 	Payload json.RawMessage `json:"payload"` // 消息内容
 }
 
+// TopicAuthorizer 主题权限校验回调
+type TopicAuthorizer func(client *ClientV2, topic string) error
+
+type topicAuthorizerRule struct {
+	Match func(topic string) bool
+	Auth  TopicAuthorizer
+}
+
 // ManagerV2 所有 websocket 信息
 type ManagerV2 struct {
 	Topics               map[string]map[string]*ClientV2 // 主题到客户端的映射
@@ -62,6 +71,7 @@ type ManagerV2 struct {
 	Message              chan *MessageDataV2
 	BroadcastMessage     chan *BroadcastMessageData
 	GroupMessage         chan *TopicMessageData
+	authorizerRules      []topicAuthorizerRule
 }
 
 // ClientV2 单个 websocket 信息
@@ -104,6 +114,37 @@ var WebsocketManagerV2 = &ManagerV2{
 	Message:          make(chan *MessageDataV2, 128),
 	BroadcastMessage: make(chan *BroadcastMessageData, 128),
 	GroupMessage:     make(chan *TopicMessageData, 128),
+}
+
+// RegisterTopicAuthorizer 注册主题权限校验规则
+func (m *ManagerV2) RegisterTopicAuthorizer(match func(topic string) bool, authorizer TopicAuthorizer) {
+	m.Lock.Lock()
+	defer m.Lock.Unlock()
+	m.authorizerRules = append(m.authorizerRules, topicAuthorizerRule{
+		Match: match,
+		Auth:  authorizer,
+	})
+}
+
+func (m *ManagerV2) authorizeTopic(c *ClientV2, topic string) error {
+	m.Lock.RLock()
+	rules := make([]topicAuthorizerRule, len(m.authorizerRules))
+	copy(rules, m.authorizerRules)
+	m.Lock.RUnlock()
+
+	for _, rule := range rules {
+		if rule.Match != nil && rule.Match(topic) {
+			if rule.Auth == nil {
+				return nil
+			}
+			return rule.Auth(c, topic)
+		}
+	}
+
+	if c.canSubscribeTopic(topic) {
+		return nil
+	}
+	return errors.New("permission denied")
 }
 
 // 启动管理器
@@ -428,15 +469,15 @@ func (c *ClientV2) handleSubscribe(m *ManagerV2, topic string) {
 		}
 	}
 
-	// 检查是否已经订阅
-	if _, exists := c.Subscriptions[finalTopic]; exists {
-		c.sendSuccess("subscribe_success", "Already subscribed")
+	// 主题权限校验
+	if err := m.authorizeTopic(c, finalTopic); err != nil {
+		c.sendError("permission_denied", err.Error())
 		return
 	}
 
-	// 检查主题权限
-	if !c.canSubscribeTopic(finalTopic) {
-		c.sendError("permission_denied", "Permission denied")
+	// 检查是否已经订阅
+	if _, exists := c.Subscriptions[finalTopic]; exists {
+		c.sendSuccess("subscribe_success", "Already subscribed")
 		return
 	}
 
